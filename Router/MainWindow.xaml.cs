@@ -561,7 +561,6 @@ namespace Router
                                     }
                                     else if (dd.DBDescriptionBits == 2 && dd.DDSequence == neighbor.dd_seq && !neighbor.master)
                                     {
-                                        Console.WriteLine("DBD CAME");
                                         neighbor.last_r = dd;
                                         neighbor.dd_seq++;
                                         neighbor.state = 4;
@@ -804,7 +803,6 @@ namespace Router
             {
                 old_seq = net.LSSequenceNumber;
                 smerovac.my_network_lsa.Remove(net);
-                smerovac.my_database.Remove(smerovac.GetInstanceOfLSA(net));
             }
 
             routers.Add(smerovac.routerID);
@@ -820,8 +818,8 @@ namespace Router
             };
             net.Checksum = smerovac.Fletcher(net.Bytes, 2, net.Length);
             smerovac.my_network_lsa.Add(net);
-            smerovac.my_database.Add(new DatabaseRecord(net));
-
+            Flood(net, null, null, null);
+            Install(net, smerovac.GetInstanceOfLSA(net));
             smerovac.mut_database.ReleaseMutex();
         }
 
@@ -890,7 +888,6 @@ namespace Router
                 if (smerovac.my_lsa != null)
                 {
                     old_seq = smerovac.my_lsa.LSSequenceNumber;
-                    smerovac.my_database.Remove(smerovac.GetInstanceOfLSA(smerovac.my_lsa));
                 }
                 smerovac.my_lsa = new RouterLSA(smerovac.links)
                 {
@@ -905,7 +902,9 @@ namespace Router
                     BBit = 0
                 };
                 smerovac.my_lsa.Checksum = smerovac.Fletcher(smerovac.my_lsa.Bytes, 2, smerovac.my_lsa.Length);
-                smerovac.my_database.Add(new DatabaseRecord(smerovac.my_lsa));
+                //smerovac.my_database.Add(new DatabaseRecord(smerovac.my_lsa));
+                Flood(smerovac.my_lsa, null, null, null);
+                Install(smerovac.my_lsa, smerovac.GetInstanceOfLSA(smerovac.my_lsa));
             }
         }
 
@@ -946,7 +945,6 @@ namespace Router
                 if (smerovac.my_lsa != null)
                 {
                     old_seq = smerovac.my_lsa.LSSequenceNumber;
-                    smerovac.my_database.Remove(smerovac.GetInstanceOfLSA(smerovac.my_lsa));
                 }
                 smerovac.my_lsa = new RouterLSA(smerovac.links)
                 {
@@ -961,7 +959,8 @@ namespace Router
                     BBit = 0
                 };
                 smerovac.my_lsa.Checksum = smerovac.Fletcher(smerovac.my_lsa.Bytes, 2, smerovac.my_lsa.Length);
-                smerovac.my_database.Add(new DatabaseRecord(smerovac.my_lsa));
+                Flood(smerovac.my_lsa, null, null, null);
+                Install(smerovac.my_lsa, smerovac.GetInstanceOfLSA(smerovac.my_lsa));
             }
         }
 
@@ -1863,7 +1862,6 @@ namespace Router
 
         public void Acknowledge(LSA lsa, Port port, Neighbor neighbor, int flag)
         {
-            Console.WriteLine("SENDING ACK");
             if (flag == 1)
             {
                 //NO ACK
@@ -1909,36 +1907,39 @@ namespace Router
                 {
                     foreach (Neighbor nei in smerovac.neighbors)
                     {
-                        if (nei.state < 4) continue;
-                        else if (nei.state != 6) // Examine the link state request list of neighbor
+                        if (nei.output == port)
                         {
-                            LSA neighbors = nei.IsInstanceInRequestList(lsa);
-                            if (neighbors != null)
+                            if (nei.state < 4) continue;
+                            else if (nei.state != 6) // Examine the link state request list of neighbor
                             {
-                                if (GetNewerLSA(lsa, neighbors) == neighbors)
+                                LSA neighbors = nei.IsInstanceInRequestList(lsa);
+                                if (neighbors != null)
                                 {
-                                    continue;
+                                    if (GetNewerLSA(lsa, neighbors) == neighbors)
+                                    {
+                                        continue;
+                                    }
+                                    else if (GetNewerLSA(lsa, neighbors) == null)
+                                    {
+                                        nei.RemoveRequestLSA(neighbors);
+                                        continue;
+                                    }
+                                    else nei.RemoveRequestLSA(neighbors);
                                 }
-                                else if (GetNewerLSA(lsa, neighbors) == null)
-                                {
-                                    nei.RemoveRequestLSA(neighbors);
-                                    continue;
-                                }
-                                else nei.RemoveRequestLSA(neighbors);
                             }
+                            if (nei.ip_add.Equals(ip))
+                            {
+                                continue;
+                            }
+                            added = true;
+                            nei.retransmission_list.Add(lsa);
                         }
-                        if (nei.ip_add.Equals(ip))
-                        {
-                            continue;
-                        }
-                        added = true;
-                        nei.retransmission_list.Add(lsa);
+                        if (!added) continue;
+                        if (port == p && (smerovac.ospf.DRs.ElementAt(smerovac.ports.IndexOf(p)).Equals(neighbor.ip_add) || smerovac.ospf.BDRs.ElementAt(smerovac.ports.IndexOf(p)).Equals(neighbor.ip_add))) continue;
+                        if (port == p && (smerovac.ospf.BDRs.ElementAt(smerovac.ports.IndexOf(port)).Equals(port.ip_add))) continue;
+                        if (port == p) receiving = true;
+                        SendLSU(lsa, port);
                     }
-                    if (!added) continue;
-                    if (port == p && (smerovac.ospf.DRs.ElementAt(smerovac.ports.IndexOf(p)).Equals(neighbor.ip_add) || smerovac.ospf.BDRs.ElementAt(smerovac.ports.IndexOf(p)).Equals(neighbor.ip_add))) continue;
-                    if (port == p && (smerovac.ospf.BDRs.ElementAt(smerovac.ports.IndexOf(port)).Equals(port.ip_add))) continue;
-                    if (port == p) receiving = true;
-                    SendLSU(lsa, port);
                 }
             }
             return receiving;
@@ -1975,7 +1976,7 @@ namespace Router
         {
             //SPF
             smerovac.mut_database.WaitOne();
-            smerovac.my_database.Remove(old);
+            if (old != null) smerovac.my_database.Remove(old);
             smerovac.my_database.Add(new DatabaseRecord(lsa));
             foreach(Neighbor nei in smerovac.neighbors)
             {
