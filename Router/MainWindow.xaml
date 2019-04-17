@@ -5,7 +5,7 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:Router"
         mc:Ignorable="d"
-        Title="MainWindow" Height="750" Width="1200">
+        Title="MainWindow" Height="800" Width="1200">
     <Grid Name="WindowGrid">
         <StackPanel Name="InterfacesStackPanel" Width="850" Margin="10">
             <Label FontSize="16" Margin="20,20,0,0" Name="p1">PORT 1</Label>
@@ -90,11 +90,17 @@
                 <TabItem Header="OSPF">
                     <StackPanel Name="OspfStackPanel" Margin="10">
                         <WrapPanel HorizontalAlignment="Center" Margin="10">
-                            <Button Margin="10" Name="OspfButt1" HorizontalAlignment="Center" Height="50" Width="200" Content="Zapnúť OSPF na porte 1" Click="OspfPort1"></Button>
-                            <Button Margin="10" Name="OspfButt2" HorizontalAlignment="Center" Height="50" Width="200" Content="Zapnúť OSPF na porte 2" Click="OspfPort2"></Button>
+                            <Button Margin="10" Name="OspfButt1" HorizontalAlignment="Center" Height="35" Width="200" Content="Zapnúť OSPF na porte 1" Click="OspfPort1"></Button>
+                            <Button Margin="10" Name="OspfButt2" HorizontalAlignment="Center" Height="35" Width="200" Content="Zapnúť OSPF na porte 2" Click="OspfPort2"></Button>
+                            <TextBox Height="35" VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Width="100" FontSize="16" Name="CostPort1" Margin="10"></TextBox>
+                            <Button Height="35" VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Width="100" Content="Cost na porte 1" Click="NastavCostPortu1" Margin="10"></Button>
+                            <TextBox Height="35" VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Width="100" FontSize="16" Name="CostPort2" Margin="10"></TextBox>
+                            <Button Height="35" VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Width="100" Content="Cost na porte 2" Click="NastavCostPortu2" Margin="10"></Button>
                         </WrapPanel>
                         <Label FontSize="16" Margin="5" HorizontalAlignment="Center">Neigbors</Label>
                         <ListBox FontSize="16" Name="NeighborListbox" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="5" Height="200" Width="800"></ListBox>
+                        <Label FontSize="16" Margin="5" HorizontalAlignment="Center">Database</Label>
+                        <ListBox FontSize="16" Name="DatabaseListbox" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="5" Height="200" Width="800"></ListBox>
                     </StackPanel>
                 </TabItem>
             </TabControl>
