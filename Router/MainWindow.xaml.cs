@@ -26,6 +26,28 @@ namespace Router
 {
     /*
      * ================================================================
+     *              OSPF SPF VERTEX
+     * ================================================================
+     */
+
+    public class Vertex
+    {
+        public LSA lsa;
+        public IPAddress vertex_id;
+        public Vertex reverse;
+        public int distance;
+
+        public Vertex(IPAddress id, LSA l, int cost, Vertex vertex)
+        {
+            this.distance = cost;
+            this.lsa = l;
+            this.vertex_id = id;
+            this.reverse = vertex;
+        }
+    }
+
+    /*
+     * ================================================================
      *              OSPF DATABASE ITEM
      * ================================================================
      */
@@ -131,7 +153,7 @@ namespace Router
         public bool IsInstanceInRetransList(LSA lsa)
         {
             bool result = false;
-            mutex.WaitOne();
+            this.mutex.WaitOne();
             foreach(LSA l in retransmission_list)
             {
                 if (l.LSType == lsa.LSType && l.LinkStateID.Equals(lsa.LinkStateID) && l.AdvertisingRouter.Equals(lsa.AdvertisingRouter))
@@ -140,7 +162,7 @@ namespace Router
                     break;
                 }
             }
-            mutex.ReleaseMutex();
+            this.mutex.ReleaseMutex();
             return result;
         }
         public LSA IsInstanceInRequestList(LSA lsa)
@@ -184,7 +206,7 @@ namespace Router
             mutex.WaitOne();
             foreach (LSA l in retransmission_list)
             {
-                if (l.LSType == lsa.LSType && l.AdvertisingRouter == lsa.AdvertisingRouter && l.LinkStateID == lsa.LinkStateID)
+                if (l.LSType == lsa.LSType && l.AdvertisingRouter.Equals(lsa.AdvertisingRouter) && l.LinkStateID.Equals(lsa.LinkStateID))
                 {
                     delete = l;
                     break;
@@ -314,7 +336,7 @@ namespace Router
         public List<Neighbor> neighbors;
         public List<RT_zaznam> smerovacia_tabulka;
         public List<ARP_zaznam> arp_tabulka;
-        public Mutex mut_arp, mut_rt, mut_sused, mut_database;
+        public Mutex mut_arp, mut_rt, mut_sused, mut_database, mut_spf;
         public int arp_timer;
         public bool manualne_RID, neighbors_changed, lsa_changed;
         public List<DatabaseRecord> my_database;
@@ -324,6 +346,7 @@ namespace Router
 
         public Smerovac(WinPcapDevice rozhranie1, WinPcapDevice rozhranie2)
         {
+            mut_spf = new Mutex();
             ports = new List<Port>
             {
                 new Port(rozhranie1),
@@ -400,7 +423,7 @@ namespace Router
         public DatabaseRecord GetInstanceOfLSA(LSA lsa)
         {
             mut_database.WaitOne();
-            foreach(DatabaseRecord l in my_database)
+            foreach (DatabaseRecord l in my_database)
             {
                 if (lsa.LSType == l.lsa.LSType && lsa.AdvertisingRouter.Equals(l.lsa.AdvertisingRouter) && lsa.LinkStateID.Equals(l.lsa.LinkStateID))
                 {
@@ -409,21 +432,19 @@ namespace Router
                 }
             }
             mut_database.ReleaseMutex();
+
             return null;
         }
 
         public LSA GetRequestedLSA(LinkStateRequest lsa)
         {
-            mut_database.WaitOne();
             foreach (DatabaseRecord l in my_database)
             {
                 if (lsa.LSType == l.lsa.LSType && lsa.AdvertisingRouter.Equals(l.lsa.AdvertisingRouter) && lsa.LinkStateID.Equals(l.lsa.LinkStateID))
                 {
-                    mut_database.ReleaseMutex();
                     return l.lsa;
                 }
             }
-            mut_database.ReleaseMutex();
             return null;
         }
 
@@ -475,9 +496,10 @@ namespace Router
     public partial class MainWindow : Window
     {
         public Smerovac smerovac;
-        public WinPcapDeviceList winlist;        
+        public WinPcapDeviceList winlist;
         public bool stop;
         public Thread th_arp, th_sused, th_hello1, th_hello2, th_waitTimer1, th_waitTimer2, th_lsa;
+        public Mutex mutex = new Mutex();
         public List<OSPFv2DDPacket> dd_processing;
 
         public MainWindow()
@@ -520,14 +542,20 @@ namespace Router
                 if (ip_packet != null)
                 {
                     var ospf_packet = (OSPFv2Packet)ip_packet.Extract(typeof(OSPFv2Packet));
-                    
+
                     if (ospf_packet != null)
                     {
                         if (!captured.ospf) return;
-                        if (!smerovac.ospf.DRs.ElementAt(smerovac.ports.IndexOf(captured)).Equals(captured.ip_add) && !smerovac.ospf.BDRs.ElementAt(smerovac.ports.IndexOf(captured)).Equals(captured.ip_add) && ip_packet.DestinationAddress.Equals(IPAddress.Parse("224.0.0.6"))) return;
+                        if (!smerovac.ospf.DRs.ElementAt(smerovac.ports.IndexOf(captured)).Equals(captured.ip_add) && !smerovac.ospf.BDRs.ElementAt(smerovac.ports.IndexOf(captured)).Equals(captured.ip_add) && ip_packet.DestinationAddress.Equals(IPAddress.Parse("224.0.0.6")))
+                        {
+                            Console.WriteLine("Neprijmam!!");
+                            return;
+                        }
                         if (ospf_packet.Type == OSPFPacketType.Hello)
                         {
                             OSPFv2HelloPacket hello = (OSPFv2HelloPacket)ospf_packet;
+                            Console.WriteLine("Dostal som hello " + hello.RouterID);
+                            Console.WriteLine("" + ip_packet.SourceAddress + " - " + hello.RouterID + " - ARRIVAL");
                             PridajSuseda(hello, ip_packet.SourceAddress, eth_packet.SourceHwAddress, captured);
                             if (smerovac.ospf.DRs.ElementAt(smerovac.ports.IndexOf(captured)).Equals(IPAddress.Parse("0.0.0.0")) &&
                                 smerovac.ospf.BDRs.ElementAt(smerovac.ports.IndexOf(captured)).Equals(IPAddress.Parse("0.0.0.0")))
@@ -539,6 +567,7 @@ namespace Router
                                     {
                                         captured.need_calculation = false;
                                         smerovac.mut_sused.WaitOne();
+                                        Console.WriteLine("8");
                                         MakeElection(captured);
                                         smerovac.mut_sused.ReleaseMutex();
                                     }
@@ -547,8 +576,11 @@ namespace Router
                         }
                         else if (ospf_packet.Type == OSPFPacketType.DatabaseDescription && ip_packet.DestinationAddress.Equals(captured.ip_add))
                         {
+                            Console.WriteLine("Dostal som DBD " + ip_packet.SourceAddress);
                             OSPFv2DDPacket dd = (OSPFv2DDPacket)ospf_packet;
+                            smerovac.mut_sused.WaitOne();
                             Neighbor neighbor = GetNeighbor(ospf_packet.RouterID, ip_packet.SourceAddress);
+                            smerovac.mut_sused.ReleaseMutex();
                             if (neighbor != null)
                             {
                                 if (neighbor.state == 3) // STATE EXSTART
@@ -625,9 +657,11 @@ namespace Router
                                         if (neighbor.state == 6)
                                         {
                                             neighbor.state = 3;
+                                            smerovac.mut_sused.WaitOne();
                                             MakeRouterLSA(captured, smerovac.ospf.DRs[smerovac.ports.IndexOf(captured)]);
                                             if (smerovac.ospf.DRs[smerovac.ports.IndexOf(captured)].Equals(captured.ip_add))
                                                 MakeNetworkLSA(captured, smerovac.ospf.DRs[smerovac.ports.IndexOf(captured)]);
+                                            smerovac.mut_sused.ReleaseMutex();
                                         }
                                         SeqNumberMismatch(neighbor);
                                         return;
@@ -643,30 +677,40 @@ namespace Router
                         }
                         else if (ospf_packet.Type == OSPFPacketType.LinkStateRequest && ip_packet.DestinationAddress.Equals(captured.ip_add))
                         {
+                            Console.WriteLine("Dostal som REQUEST " + ip_packet.SourceAddress);
                             OSPFv2LSRequestPacket request = (OSPFv2LSRequestPacket)ospf_packet;
+                            smerovac.mut_sused.WaitOne();
                             Neighbor neighbor = GetNeighbor(ospf_packet.RouterID, ip_packet.SourceAddress);
+                            smerovac.mut_sused.ReleaseMutex();
 
-                            if (neighbor.state < 4) return;
+                            if (neighbor == null || neighbor.state < 4) return;
 
                             SendRequestedLSAs(neighbor, request, eth_packet.SourceHwAddress);
                         }
                         else if (ospf_packet.Type == OSPFPacketType.LinkStateUpdate)
                         {
+                            Console.WriteLine("Dostal som UPDATE " + ip_packet.SourceAddress);
                             OSPFv2LSUpdatePacket update = (OSPFv2LSUpdatePacket)ospf_packet;
+                            smerovac.mut_sused.WaitOne();
                             Neighbor neighbor = GetNeighbor(ospf_packet.RouterID, ip_packet.SourceAddress);
+                            smerovac.mut_sused.ReleaseMutex();
 
-                            if (neighbor.state < 4) return;
-
-                            ProcessLSU(neighbor, update.LSAUpdates, captured, ip_packet.SourceAddress);
+                            if (neighbor == null || neighbor.state < 4) return;
+                            mutex.WaitOne();
+                            ProcessLSU(neighbor, update.LSAUpdates, captured, ip_packet.SourceAddress, eth_packet.SourceHwAddress);
+                            mutex.ReleaseMutex();
                         }
                         else if (ospf_packet.Type == OSPFPacketType.LinkStateAcknowledgment)
                         {
+                            Console.WriteLine("Dostal som ACK " + ip_packet.SourceAddress);
                             OSPFv2LSAPacket ack = (OSPFv2LSAPacket)ospf_packet;
+                            smerovac.mut_sused.WaitOne();
                             Neighbor neighbor = GetNeighbor(ospf_packet.RouterID, ip_packet.SourceAddress);
+                            smerovac.mut_sused.ReleaseMutex();
 
-                            if (neighbor.state < 4) return;
+                            if (neighbor == null || neighbor.state < 4) return;
 
-                            foreach(LSA lsa in ack.LSAAcknowledge)
+                            foreach (LSA lsa in ack.LSAAcknowledge)
                             {
                                 neighbor.RemoveRetransLSA(lsa);
                             }
@@ -784,11 +828,12 @@ namespace Router
          *          OSPF
          * ================================================================
          */
-        
+
         public void MakeNetworkLSA(Port port, IPAddress dr)
         {
             uint old_seq = 0x80000000;
             List<IPAddress> routers = FullNeighbor(port);
+
             if (routers.Count == 0) return;
             NetworkLSA net = null;
             smerovac.mut_database.WaitOne();
@@ -836,16 +881,20 @@ namespace Router
             if (net != null)
             {
                 smerovac.my_network_lsa.Remove(net);
-                smerovac.my_database.Remove(smerovac.GetInstanceOfLSA(net));
+                net.LSAge = 3600;
+                Flood(net, null, null, null);
             }
             smerovac.mut_database.ReleaseMutex();
         }
 
         public void MakeRouterLSA(Port port, IPAddress dr)
         {
+            int count = FullNeighbor(port).Count;
+            Neighbor neighbor = GetNeighbor(null, dr);
+            
             if (dr.Equals(IPAddress.Parse("0.0.0.0")))
                 MakeStub(port);
-            else if ((!port.ip_add.Equals(dr) && (GetNeighbor(null, dr).state == 6)) || (port.ip_add.Equals(dr) && FullNeighbor(port).Count > 0))
+            else if ((!port.ip_add.Equals(dr) && neighbor.state == 6) || (port.ip_add.Equals(dr) && count > 0))
                 MakeTransit(port, dr);
             else MakeStub(port);
         }
@@ -991,8 +1040,6 @@ namespace Router
             List<DatabaseRecord> vymazat = new List<DatabaseRecord>();
             while (!stop)
             {
-                vymazat.Clear();
-                
                 smerovac.mut_database.WaitOne();
                 DatabaseListbox.Dispatcher.Invoke(() =>
                 {
@@ -1001,21 +1048,47 @@ namespace Router
                 foreach (DatabaseRecord lsa in smerovac.my_database)
                 {
                     ++lsa.learned;
-                    if (++lsa.lsa.LSAge == 3600)
+                    if (lsa.lsa.LSAge == 3600)
                     {
-                        vymazat.Add(lsa);
+                        if (!vymazat.Contains(lsa)) vymazat.Add(lsa);
+                    }
+                    else if (lsa.lsa.LSAge == 1800)
+                    {
+                        if (lsa.lsa.AdvertisingRouter.Equals(smerovac.routerID) || (lsa.lsa.LSType == LSAType.Network && (lsa.lsa.LinkStateID.Equals(smerovac.GetPortAt(0).ip_add) || lsa.lsa.LinkStateID.Equals(smerovac.GetPortAt(1).ip_add))))
+                        {
+                            lsa.lsa.LSAge = 0;
+                            lsa.lsa.LSSequenceNumber += 1;
+                            Flood(lsa.lsa, null, null, null);
+                        }
                     }
                     else
                     {
+                        ++lsa.lsa.LSAge;
                         DatabaseListbox.Dispatcher.Invoke(() =>
                         {
                             DatabaseListbox.Items.Add(lsa.lsa.LSAge + "\t" + lsa.lsa.LSType + "\t" + lsa.lsa.LinkStateID + "\t" + lsa.lsa.AdvertisingRouter + "\t" + lsa.lsa.LSSequenceNumber.ToString("X") + "\t" + lsa.learned);
                         });
                     }
                 }
+                bool contained = false;
                 foreach (DatabaseRecord lsa in vymazat)
-                    smerovac.my_database.Remove(lsa);
-
+                {
+                    smerovac.mut_sused.WaitOne();
+                    foreach (Neighbor nei in smerovac.neighbors)
+                    {
+                        if (nei.IsInstanceInRetransList(lsa.lsa))
+                        {
+                            contained = true;
+                            break;
+                        }
+                    }
+                    smerovac.mut_sused.ReleaseMutex();
+                    int count = smerovac.CountOfNeighborInStates(4, 5);
+                    if (!contained && count == 0)
+                    {
+                        smerovac.my_database.Remove(lsa);
+                    }
+                }
                 smerovac.mut_database.ReleaseMutex();
                 Thread.Sleep(1000);
             }
@@ -1028,14 +1101,21 @@ namespace Router
                 smerovac.GetPortAt(0).ospf = true;
                 th_hello1 = new Thread(() => PosliHello(smerovac.GetPortAt(0)));
                 th_waitTimer1 = new Thread(() => WaitTimer(smerovac.GetPortAt(0)));
-                MakeRouterLSA(smerovac.GetPortAt(0), smerovac.ospf.DRs[smerovac.ports.IndexOf(smerovac.GetPortAt(0))]);
+                new Thread(() =>
+                {
+                    smerovac.mut_sused.WaitOne();
+                    MakeRouterLSA(smerovac.GetPortAt(0), smerovac.ospf.DRs[smerovac.ports.IndexOf(smerovac.GetPortAt(0))]);
+                    smerovac.mut_sused.ReleaseMutex();
+                }).Start();
                 th_hello1.Start();
                 th_waitTimer1.Start();
                 OspfButt1.Content = "Vypnúť OSPF na porte 1";
             } else
             {
                 smerovac.GetPortAt(0).ospf = false;
+                smerovac.mut_sused.WaitOne();
                 MakeRouterLSA(smerovac.GetPortAt(0), smerovac.ospf.DRs[smerovac.ports.IndexOf(smerovac.GetPortAt(0))]);
+                smerovac.mut_sused.ReleaseMutex();
                 //th_hello1.Join();
                 th_hello1 = null;
                 //th_waitTimer1.Join();
@@ -1051,7 +1131,12 @@ namespace Router
                 smerovac.GetPortAt(1).ospf = true;
                 th_hello2 = new Thread(() => PosliHello(smerovac.GetPortAt(1)));
                 th_waitTimer2 = new Thread(() => WaitTimer(smerovac.GetPortAt(1)));
-                MakeRouterLSA(smerovac.GetPortAt(1), smerovac.ospf.DRs[smerovac.ports.IndexOf(smerovac.GetPortAt(1))]);
+                new Thread(() =>
+                {
+                    smerovac.mut_sused.WaitOne();
+                    MakeRouterLSA(smerovac.GetPortAt(1), smerovac.ospf.DRs[smerovac.ports.IndexOf(smerovac.GetPortAt(1))]);
+                    smerovac.mut_sused.ReleaseMutex();
+                }).Start();
                 th_hello2.Start();
                 th_waitTimer2.Start();
                 OspfButt2.Content = "Vypnúť OSPF na porte 2";
@@ -1059,7 +1144,9 @@ namespace Router
             else
             {
                 smerovac.GetPortAt(1).ospf = false;
+                smerovac.mut_sused.WaitOne();
                 MakeRouterLSA(smerovac.GetPortAt(1), smerovac.ospf.DRs[smerovac.ports.IndexOf(smerovac.GetPortAt(1))]);
+                smerovac.mut_sused.ReleaseMutex();
                 //th_hello2.Join();
                 th_hello2 = null;
                 //th_waitTimer2.Join();
@@ -1070,24 +1157,19 @@ namespace Router
 
         public Neighbor GetNeighbor(IPAddress router_id, IPAddress ip)
         {
-            smerovac.mut_sused.WaitOne();
             foreach (Neighbor nei in smerovac.neighbors)
                 if ((router_id == null && nei.ip_add.Equals(ip)) || (nei.neighbor_id.Equals(router_id) && nei.ip_add.Equals(ip)))
                 {
-                    smerovac.mut_sused.ReleaseMutex();
                     return nei;
                 }
-            smerovac.mut_sused.ReleaseMutex();
             return null;
         }
 
         public List<IPAddress> FullNeighbor(Port port)
         {
             List<IPAddress> ret = new List<IPAddress>();
-            smerovac.mut_sused.WaitOne();
             foreach (Neighbor nei in smerovac.neighbors)
                 if (nei.state == 6 && nei.output == port) ret.Add(nei.neighbor_id);
-            smerovac.mut_sused.ReleaseMutex();
             return ret;
         }
 
@@ -1100,7 +1182,10 @@ namespace Router
             //smerovac.neighbors.Add(new Neighbor(IPAddress.Parse("8.8.8.8"), IPAddress.Parse("100.100.100.108"), 1, 20, 2, port, IPAddress.Parse("0.0.0.0"), IPAddress.Parse("0.0.0.0")));
             if (port.ospf && port.need_calculation)
             {
+                Console.WriteLine("9");
+                smerovac.mut_sused.WaitOne();
                 MakeElection(port);
+                smerovac.mut_sused.ReleaseMutex();
                 port.need_calculation = false;
             }
         }
@@ -1121,8 +1206,11 @@ namespace Router
             }
             smerovac.ospf.DRs[smerovac.ports.IndexOf(port)] = result.Item1;
             smerovac.ospf.BDRs[smerovac.ports.IndexOf(port)] = result.Item2;
+            
             ChangeAdj(result.Item1, result.Item2, port);
             MakeRouterLSA(port, result.Item1);
+            int count = FullNeighbor(port).Count;
+            if (port.ip_add.Equals(result.Item1) && count == 0) FlushNetworkLSA(port);
             if (port.ip_add.Equals(actualDR) && !port.ip_add.Equals(result.Item1)) FlushNetworkLSA(port); // NO LONGER DR
             if (!port.ip_add.Equals(actualDR) && port.ip_add.Equals(result.Item1)) MakeNetworkLSA(port, result.Item1); // NEW DR
         }
@@ -1141,7 +1229,7 @@ namespace Router
                         if (nei.state == 2)
                         {
                             nei.state = 3;
-                            Thread thread = new Thread(() => ExStart(nei));                            
+                            Thread thread = new Thread(() => ExStart(nei));
                             //dd_thread.Add(thread);
                             thread.Start();
                         }
@@ -1207,7 +1295,7 @@ namespace Router
 
         public Tuple<IPAddress, IPAddress> Election(Port port)
         {
-            IPAddress actualDR = smerovac.ospf.DRs.ElementAt(smerovac.ports.IndexOf(port)), 
+            IPAddress actualDR = smerovac.ospf.DRs.ElementAt(smerovac.ports.IndexOf(port)),
                 actualBDR = smerovac.ospf.BDRs.ElementAt(smerovac.ports.IndexOf(port));
             List<Neighbor> candidates = new List<Neighbor>();
             bool possibleDR = false, possibleBDR = false;
@@ -1237,7 +1325,7 @@ namespace Router
                         {
                             if (BDR != null)
                             {
-                                if (n.priority > BDR.priority || (n.priority == BDR.priority && smerovac.GreaterIP(n.neighbor_id, BDR.neighbor_id) == n.neighbor_id))
+                                if (n.priority > BDR.priority || (n.priority == BDR.priority && smerovac.GreaterIP(n.neighbor_id, BDR.neighbor_id).Equals(n.neighbor_id)))
                                 {
                                     BDR = n;
                                 }
@@ -1249,7 +1337,7 @@ namespace Router
                     {
                         if (BDR != null)
                         {
-                            if (n.priority > BDR.priority || (n.priority == BDR.priority && smerovac.GreaterIP(n.neighbor_id, BDR.neighbor_id) == n.neighbor_id))
+                            if (n.priority > BDR.priority || (n.priority == BDR.priority && smerovac.GreaterIP(n.neighbor_id, BDR.neighbor_id).Equals(n.neighbor_id)))
                             {
                                 BDR = n;
                             }
@@ -1266,7 +1354,7 @@ namespace Router
                     {
                         if (DR != null)
                         {
-                            if (n.priority > DR.priority || (n.priority == DR.priority && smerovac.GreaterIP(n.neighbor_id, DR.neighbor_id) == n.neighbor_id))
+                            if (n.priority > DR.priority || (n.priority == DR.priority && smerovac.GreaterIP(n.neighbor_id, DR.neighbor_id).Equals(n.neighbor_id)))
                             {
                                 DR = n;
                             }
@@ -1300,39 +1388,34 @@ namespace Router
 
             ip.PayloadPacket = hello;
             eth.PayloadPacket = ip;
-
             while (port.ospf)
             {
                 hello.DesignatedRouterID = smerovac.ospf.DRs.ElementAt(smerovac.ports.IndexOf(port));
                 hello.BackupRouterID = smerovac.ospf.BDRs.ElementAt(smerovac.ports.IndexOf(port));
                 hello.RtrPriority = smerovac.ospf.priority;
 
-                if (smerovac.neighbors_changed)
+                neighbors.Clear();
+
+                smerovac.mut_sused.WaitOne();
+                foreach (Neighbor n in smerovac.neighbors)
+                    if (n.output == port)
+                        neighbors.Add(n.neighbor_id);
+                smerovac.mut_sused.ReleaseMutex();
+
+                hello = new OSPFv2HelloPacket(port.maska, 10, 40, neighbors)
                 {
-                    smerovac.neighbors_changed = false;
-                    neighbors.Clear();
+                    AreaID = smerovac.ospf.AreaID,
+                    RtrPriority = smerovac.ospf.priority,
+                    HelloOptions = 2,
+                    RouterID = smerovac.routerID,
+                    DesignatedRouterID = smerovac.ospf.DRs.ElementAt(smerovac.ports.IndexOf(port)),
+                    BackupRouterID = smerovac.ospf.BDRs.ElementAt(smerovac.ports.IndexOf(port))
+                };
+                ip.PayloadPacket = hello;
 
-                    smerovac.mut_sused.WaitOne();
-                    foreach (Neighbor n in smerovac.neighbors)
-                        if (n.output == port)
-                            neighbors.Add(n.neighbor_id);
-                    smerovac.mut_sused.ReleaseMutex();
-
-                    hello = new OSPFv2HelloPacket(port.maska, 10, 40, neighbors)
-                    {
-                        AreaID = smerovac.ospf.AreaID,
-                        RtrPriority = smerovac.ospf.priority,
-                        HelloOptions = 2,
-                        RouterID = smerovac.routerID,
-                        DesignatedRouterID = smerovac.ospf.DRs.ElementAt(smerovac.ports.IndexOf(port)),
-                        BackupRouterID = smerovac.ospf.BDRs.ElementAt(smerovac.ports.IndexOf(port))
-                    };
-                    ip.PayloadPacket = hello;
-                }
-                
                 ip.Checksum = 0;
                 ip.UpdateIPChecksum();
-                
+
                 hello.Checksum = 0;
                 hello.Checksum = smerovac.ComputeChecksum(hello.HeaderData, 0, hello.HeaderData.Length);
 
@@ -1350,7 +1433,7 @@ namespace Router
             foreach (Neighbor n in smerovac.neighbors)
                 if (n.output == port)
                     vymazat.Add(n);
-            
+
             foreach (Neighbor n in vymazat)
             {
                 if (n.state == 6) need_calculation = true;
@@ -1369,6 +1452,7 @@ namespace Router
         public void PridajSuseda(OSPFv2HelloPacket hello, IPAddress ip, PhysicalAddress mac, Port port)
         {
             smerovac.mut_sused.WaitOne();
+            Console.WriteLine("" + ip + " - " + hello.RouterID + " - MUTEX");
             foreach (Neighbor n in smerovac.neighbors)
                 if (n.neighbor_id.Equals(hello.RouterID) && n.ip_add.Equals(ip))
                 {
@@ -1378,7 +1462,10 @@ namespace Router
                     {
                         n.state = 2;
                         if (!port.need_calculation)
+                        {
+                            Console.WriteLine("1");
                             MakeElection(port);
+                        }
                     }
                     if (n.state >= 2 && !port.need_calculation)
                     {
@@ -1386,12 +1473,14 @@ namespace Router
                         {
                             n.dr = hello.DesignatedRouterID;
                             n.bdr = hello.BackupRouterID;
+                            Console.WriteLine("2");
                             MakeElection(port);
                         }
                         if (!n.bdr.Equals(hello.BackupRouterID) && hello.BackupRouterID.Equals(ip))
                         {
                             n.dr = hello.DesignatedRouterID;
                             n.bdr = hello.BackupRouterID;
+                            Console.WriteLine("3");
                             MakeElection(port);
                         }
 
@@ -1399,12 +1488,14 @@ namespace Router
                         {
                             n.dr = hello.DesignatedRouterID;
                             n.bdr = hello.BackupRouterID;
+                            Console.WriteLine("4");
                             MakeElection(port);
                         }
                         if (n.bdr.Equals(ip) && !hello.BackupRouterID.Equals(ip))
                         {
                             n.dr = hello.DesignatedRouterID;
                             n.bdr = hello.BackupRouterID;
+                            Console.WriteLine("5");
                             MakeElection(port);
                         }
                         if (n.priority != hello.RtrPriority)
@@ -1412,6 +1503,7 @@ namespace Router
                             n.priority = hello.RtrPriority;
                             n.dr = hello.DesignatedRouterID;
                             n.bdr = hello.BackupRouterID;
+                            Console.WriteLine("6");
                             MakeElection(port);
                         }
                     }
@@ -1422,7 +1514,11 @@ namespace Router
             if (hello.NeighborID.Contains(smerovac.routerID))
             {
                 smerovac.neighbors.Add(new Neighbor(hello.RouterID, ip, hello.RtrPriority, hello.RouterDeadInterval, 2, port, hello.DesignatedRouterID, hello.BackupRouterID, master, (uint)new Random().Next(9999)));
-                if (!port.need_calculation) MakeElection(port);
+                if (!port.need_calculation)
+                {
+                    Console.WriteLine("7");
+                    MakeElection(port);
+                }
             }
             else smerovac.neighbors.Add(new Neighbor(hello.RouterID, ip, hello.RtrPriority, hello.RouterDeadInterval, 1, port, hello.DesignatedRouterID, hello.BackupRouterID, master, (uint)new Random().Next(9999)));
             smerovac.neighbors_changed = true;
@@ -1456,8 +1552,6 @@ namespace Router
                     if (nei.state > 1) MakeElection(nei.output);
                 }
                 
-                smerovac.mut_sused.ReleaseMutex();
-
                 foreach (Neighbor nei in vymazat)
                 {
                     if (nei.state == 6)
@@ -1467,6 +1561,7 @@ namespace Router
                             MakeNetworkLSA(nei.output, smerovac.ospf.DRs[smerovac.ports.IndexOf(nei.output)]);
                     }
                 }
+                smerovac.mut_sused.ReleaseMutex();
                 vymazat.Clear();
                 Thread.Sleep(1000);
             }
@@ -1501,7 +1596,7 @@ namespace Router
                 DBDescriptionBits = 7,
                 Checksum = 0
             };
-            
+
             eth.PayloadPacket = ip;
             ip.PayloadPacket = dd;
             dd.Checksum = smerovac.ComputeChecksum(dd.HeaderData, 0, dd.HeaderData.Length);
@@ -1509,7 +1604,7 @@ namespace Router
 
             neighbor.last_s = dd;
             neighbor.output.port.SendPacket(eth);
-            
+
             while (neighbor.state == 3)
             {
                 Thread.Sleep(100);
@@ -1520,7 +1615,7 @@ namespace Router
                     return;
                 }
                 if (timer % 50 == 0 && timer >= 50) neighbor.output.port.SendPacket(eth);
-            }            
+            }
             ExChange(neighbor, eth);
         }
 
@@ -1532,20 +1627,10 @@ namespace Router
 
             smerovac.mut_database.WaitOne();
 
-            foreach(DatabaseRecord lsa in smerovac.my_database)
+            foreach (DatabaseRecord lsa in smerovac.my_database)
             {
-                newLSA = new LSA()
-                {
-                    AdvertisingRouter = lsa.lsa.AdvertisingRouter,
-                    LSType = lsa.lsa.LSType,
-                    LinkStateID = lsa.lsa.LinkStateID,
-                    LSSequenceNumber = lsa.lsa.LSSequenceNumber,
-                    LSAge = lsa.lsa.LSAge,
-                    Options = lsa.lsa.Options,
-                    Checksum = lsa.lsa.Checksum,
-                    Length = lsa.lsa.Length
-                };
-                list_to_send.Add(newLSA);
+                if (lsa.lsa.LSAge != 3600) list_to_send.Add(lsa.lsa);
+                else neighbor.AddToRetransList(lsa.lsa);
             }
 
             neighbor.summary_list = list_to_send;
@@ -1668,7 +1753,7 @@ namespace Router
                     if (timer % 50 == 0 && timer >= 50) neighbor.output.port.SendPacket(eth);
                 }
             }
-            while(neighbor.state != 5)
+            while (neighbor.state != 5)
             {
                 Thread.Sleep(50);
             }
@@ -1680,7 +1765,7 @@ namespace Router
             Console.WriteLine(neighbor.neighbor_id + " TRANSITION TO LOADING");
 
             List<LinkStateRequest> request_list = new List<LinkStateRequest>();
-            foreach(LSA lsa in neighbor.request_list)
+            foreach (LSA lsa in neighbor.request_list)
             {
                 request_list.Add(new LinkStateRequest()
                 {
@@ -1707,9 +1792,11 @@ namespace Router
             }
 
             neighbor.state = 6;
+            smerovac.mut_sused.WaitOne();
             MakeRouterLSA(neighbor.output, smerovac.ospf.DRs[smerovac.ports.IndexOf(neighbor.output)]);
             if (smerovac.ospf.DRs[smerovac.ports.IndexOf(neighbor.output)].Equals(neighbor.output.ip_add))
                 MakeNetworkLSA(neighbor.output, smerovac.ospf.DRs[smerovac.ports.IndexOf(neighbor.output)]);
+            smerovac.mut_sused.ReleaseMutex();
             Console.WriteLine(neighbor.neighbor_id + " TRANSITION TO FULL");
             return;
         }
@@ -1818,19 +1905,27 @@ namespace Router
             }
         }
 
-        public void ProcessLSU(Neighbor neighbor, List<LSA> list, Port port, IPAddress ip)
+        public void ProcessLSU(Neighbor neighbor, List<LSA> list, Port port, IPAddress ip, PhysicalAddress mac)
         {
+            Console.WriteLine(" ZACAL SOM LSU");
             foreach (LSA lsa in list)
             {
                 if (!smerovac.IsChecksumCorrect(lsa.Bytes, 2, lsa.Length)) continue;
                 if (lsa.LSType != LSAType.Network && lsa.LSType != LSAType.Router) continue;
-                else if (lsa.LSAge == 3600 && smerovac.GetInstanceOfLSA(lsa) == null && smerovac.CountOfNeighborInStates(4, 5) == 0)
+                Console.WriteLine(" ZACAL SOM GETINSTANCELSA");
+                DatabaseRecord myLSA = smerovac.GetInstanceOfLSA(lsa);
+                Console.WriteLine("SKONCIL SOM GETINSTANCELSA------------");
+                Console.WriteLine("ZACAL SOM Countofneighbor");
+                int count = smerovac.CountOfNeighborInStates(4, 5);
+                Console.WriteLine("SKONCIL SOM Countofneighbor-----------");
+                if (lsa.LSAge == 3600 && myLSA == null && count == 0)
                 {
-                    Acknowledge(lsa, port, neighbor, 5);
+                    Console.WriteLine("ZACAL SOM ACK 5");
+                    Acknowledge(lsa, port, neighbor, 5, mac);
+                    Console.WriteLine("SKONCIL SOM ACK 5---------");
                     continue;
                 }
-
-                DatabaseRecord myLSA = smerovac.GetInstanceOfLSA(lsa);
+                
                 if (myLSA == null || GetNewerLSA(lsa, myLSA.lsa) == lsa)
                 {
                     if (myLSA != null && myLSA.learned < 1)
@@ -1838,35 +1933,62 @@ namespace Router
                         // NO ACK
                         continue;
                     }
+                    Console.WriteLine("ZACAL SOM FLOOD");
                     bool flag = Flood(lsa, neighbor, port, ip);
+                    Console.WriteLine("SKONCIL SOM FLOOD------");
+                    smerovac.mut_sused.WaitOne();
                     foreach (Neighbor nei in smerovac.neighbors)
                     {
-                        if(myLSA != null)
+                        if (myLSA != null)
+                        {
+                            Console.WriteLine("ZACAL SOM RemoveRetrans");
                             nei.RemoveRetransLSA(myLSA.lsa);
+                            Console.WriteLine("SKONCIL SOM RemoveRetrans-----");
+                        }
                     }
+                    smerovac.mut_sused.ReleaseMutex();
+                    Console.WriteLine("ZACAL SOM INSTALL");
                     Install(lsa, myLSA);
+                    Console.WriteLine("SKONCIL SOM INSTALL------");
                     if (!flag && (myLSA == null || GetNewerLSA(lsa, myLSA.lsa) == lsa))
                     {
-                        Acknowledge(lsa, port, neighbor, 2);
+                        Console.WriteLine("ZACAL SOM ACK 2");
+                        Acknowledge(lsa, port, neighbor, 2, mac);
+                        Console.WriteLine("SKONCIL SOM ACK 2-----");
                     }
                     if (lsa.AdvertisingRouter.Equals(smerovac.routerID) || (lsa.LSType == LSAType.Network && (lsa.LinkStateID.Equals(smerovac.GetPortAt(0).ip_add) || lsa.LinkStateID.Equals(smerovac.GetPortAt(1).ip_add))))
                     {
-                        SelfOriginated(lsa);
+                        Console.WriteLine("ZACAL SOM SELFORIG");
+                        SelfOriginated(lsa, port);
+                        Console.WriteLine("SKONCIL SOM SELFORIG ---------");
                     }
                 }
                 else if (neighbor.IsInstanceInRequestList(lsa) != null)
                 {
+                    Console.WriteLine("ZACAL SOM SEQ");
                     SeqNumberMismatch(neighbor);
+                    Console.WriteLine("SKONCIL SOM SEQ------");
                     return;
                 }
                 else if (GetNewerLSA(lsa, myLSA.lsa) == null)
                 {
-                    if (neighbor.IsInstanceInRetransList(lsa))
+                    Console.WriteLine("ZACAL SOM ISINSTANCEINRETRANS");
+                    bool x = neighbor.IsInstanceInRetransList(lsa);
+                    Console.WriteLine("SKONCIL SOM ISINSTANCEINRETRANS--------");
+                    if (x)
                     {
+                        Console.WriteLine("ZACAL SOM REMOVERETRANS");
                         neighbor.RemoveRetransLSA(lsa);
-                        Acknowledge(lsa, port, neighbor, 3); // AS IMPLIED ACK
+                        Console.WriteLine("SKONCIL SOM REMOVERETRANS------");
+                        Console.WriteLine("ZACAL SOM ACK 3");
+                        Acknowledge(lsa, port, neighbor, 3, mac); // AS IMPLIED ACK
+                        Console.WriteLine("SKONCIL SOM ACK 3--------");
                     }
-                    else Acknowledge(lsa, port, neighbor, 4);
+                    else {
+                        Console.WriteLine("ZACAL SOM ACK 4");
+                        Acknowledge(lsa, port, neighbor, 4, mac);
+                        Console.WriteLine("SKONCIL SOM ACK 4-----");
+                    }
                 }
                 else
                 {
@@ -1874,19 +1996,29 @@ namespace Router
                     {
                         continue;
                     }
-                    /*
-                        otherwise, as long as the database copy has not been sent in a 
-                        LSU within the last MinLSArrival seconds, send the database copy 
-                        back to the sending neighbor, encapsulated within a LSU Packet. 
-                        The LSU Packet should be sent directly to the neighbor. In so doing, 
-                        do not put the database copy of the LSA on the neighbor's link state 
-                        retransmission list, and do not acknowledge the received LSA instance.
-                    */
+                    EthernetPacket eth = new EthernetPacket(port.port.MacAddress, mac, EthernetPacketType.IPv4);
+                    IPv4Packet ipp = new IPv4Packet(port.ip_add, neighbor.ip_add)
+                    {
+                        TimeToLive = 1,
+                        Checksum = 0,
+                    };
+                    OSPFv2LSUpdatePacket lsu = new OSPFv2LSUpdatePacket(new List<LSA>() { myLSA.lsa })
+                    {
+                        AreaID = smerovac.ospf.AreaID,
+                        Checksum = 0,
+                        RouterID = smerovac.routerID
+                    };
+                    eth.PayloadPacket = ipp;
+                    ipp.PayloadPacket = lsu;
+                    lsu.Checksum = smerovac.ComputeChecksum(lsu.HeaderData, 0, lsu.HeaderData.Length);
+                    ipp.UpdateIPChecksum();
+                    port.port.SendPacket(eth);
                 }
             }
+            Console.WriteLine(" SKONCIL SOM LSU");
         }
 
-        public void Acknowledge(LSA lsa, Port port, Neighbor neighbor, int flag)
+        public void Acknowledge(LSA lsa, Port port, Neighbor neighbor, int flag, PhysicalAddress mac)
         {
             if (flag == 1)
             {
@@ -1915,11 +2047,11 @@ namespace Router
             }
             else if (flag == 4)
             {
-                SendDirectACK(lsa, port, neighbor);
+                SendDirectACK(lsa, port, neighbor, mac);
             }
             else
             {
-                SendDirectACK(lsa, port, neighbor);
+                SendDirectACK(lsa, port, neighbor, mac);
             }
         }
 
@@ -1964,14 +2096,14 @@ namespace Router
                         if (port == p && (smerovac.ospf.DRs.ElementAt(smerovac.ports.IndexOf(p)).Equals(neighbor.ip_add) || smerovac.ospf.BDRs.ElementAt(smerovac.ports.IndexOf(p)).Equals(neighbor.ip_add))) continue;
                         if (port == p && (smerovac.ospf.BDRs.ElementAt(smerovac.ports.IndexOf(port)).Equals(port.ip_add))) continue;
                         if (port == p) receiving = true;
-                        SendLSU(lsa, port);
+                        SendLSU(lsa, port, nei);
                     }
                 }
             }
             return receiving;
         }
 
-        public void SendLSU(LSA lsa, Port port)
+        public void SendLSU(LSA lsa, Port port, Neighbor neighbor)
         {
             EthernetPacket eth = new EthernetPacket(port.port.MacAddress, PhysicalAddress.Parse("01-00-5E-00-00-05"), EthernetPacketType.IPv4);
             IPv4Packet ip;
@@ -1996,24 +2128,343 @@ namespace Router
             ip.PayloadPacket = updatePacket;
             ip.UpdateIPChecksum();
             port.port.SendPacket(eth);
+
+            //new Thread(() => Retrans(neighbor, lsa)).Start();
+        }
+
+        public void Retrans(Neighbor neighbor, LSA lsa)
+        {
+            PhysicalAddress neighbor_mac = ARPLookup(neighbor.ip_add);
+            while (neighbor_mac == null)
+            {
+                PosliArpRequest(neighbor.output, neighbor.ip_add);
+                Thread.Sleep(100);
+                neighbor_mac = ARPLookup(neighbor.ip_add);
+            }
+
+            EthernetPacket eth2 = new EthernetPacket(neighbor.output.port.MacAddress, neighbor_mac, EthernetPacketType.IPv4);
+            IPv4Packet ip2 = new IPv4Packet(neighbor.output.ip_add, neighbor.ip_add)
+            {
+                TimeToLive = 1,
+                Checksum = 0
+            };
+            OSPFv2LSUpdatePacket ret = new OSPFv2LSUpdatePacket(new List<LSA> { lsa })
+            {
+                AreaID = smerovac.ospf.AreaID,
+                Checksum = 0,
+                RouterID = smerovac.routerID
+            };
+            ret.Checksum = smerovac.ComputeChecksum(ret.HeaderData, 0, ret.HeaderData.Length);
+            eth2.PayloadPacket = ip2;
+            ip2.PayloadPacket = ret;
+            ip2.UpdateIPChecksum();
+
+            int timer = 1000;
+            while (neighbor.IsInstanceInRetransList(lsa))
+            {
+                Thread.Sleep(100);
+                if (neighbor.state < 4) return;
+                if (--timer == 0)
+                {
+                    neighbor.state = 0;
+                    return;
+                }
+                if (timer % 50 == 0 && timer >= 50) neighbor.output.port.SendPacket(eth2);
+            }
+        }
+
+        public void SPF(List<DatabaseRecord> database)
+        {
+            //present routing table is invalidated, is saved
+            List<RT_zaznam> old = new List<RT_zaznam>();
+            foreach (RT_zaznam rt in smerovac.smerovacia_tabulka)
+            {
+                if (rt.type == 'O')
+                {
+                    old.Add(rt);
+                }
+            }
+            foreach (RT_zaznam rt in old)
+            {
+                smerovac.smerovacia_tabulka.Remove(rt);
+            }
+
+            //at first routers and transit network
+
+            List<Vertex> tree = new List<Vertex>();
+            List<Vertex> candidates = new List<Vertex>();
+            Vertex root = new Vertex(smerovac.routerID, smerovac.my_lsa, 0, null);
+            tree.Add(root);
+
+            candidates = GetCandidates(candidates, tree, smerovac.my_lsa, root, database, 0);
+            Vertex v;
+            while (candidates.Count > 0)
+            {
+                v = getMinVertex(candidates);
+                tree.Add(v);
+                candidates = removeFromCandidates(candidates, v);
+                candidates = GetCandidates(candidates, tree, v.lsa, v, database, v.distance);
+            }
+            foreach(Vertex ver in tree)
+            {
+                if (ver.lsa.LSType == LSAType.Router)
+                {
+                    foreach(RouterLink link in ((RouterLSA)ver.lsa).RouterLinks)
+                    {
+                        if (link.Type == 3)
+                        {
+                            IPAddress nexthop = null;
+                            Port port = null;
+                            Vertex aktual = ver, predosly = ver;
+                            while (!aktual.vertex_id.Equals(smerovac.routerID))
+                            {
+                                if (aktual.lsa.LSType == LSAType.Router) predosly = aktual;
+                                aktual = aktual.reverse;
+                            }
+                            if (predosly.lsa.LSType == LSAType.Network) continue;
+                            foreach (RouterLink l in ((RouterLSA)predosly.lsa).RouterLinks)
+                            {
+                                if (IPtoNet(l.LinkData, smerovac.ports[0].maska).Equals(IPtoNet(smerovac.ports[0].ip_add, smerovac.ports[0].maska)))
+                                {
+                                    nexthop = l.LinkData;
+                                    port = smerovac.ports[0];
+                                }
+                                else if (IPtoNet(l.LinkData, smerovac.ports[1].maska).Equals(IPtoNet(smerovac.ports[1].ip_add, smerovac.ports[1].maska)))
+                                {
+                                    nexthop = l.LinkData;
+                                    port = smerovac.ports[1];
+                                }
+                            }
+                            RT_zaznam novy = new RT_zaznam(IPtoNet(link.LinkID, link.LinkData), link.LinkData, nexthop, port, 'O');
+                            novy.metric = ver.distance + link.Metric;
+                            PridajSietDoTabulky(novy);
+                        }
+                    }
+                }
+                else
+                {
+                    NetworkLSA network = (NetworkLSA)ver.lsa;
+                    //Vypocitat nexthop
+                    IPAddress nexthop = null;
+                    Port port = null;
+                    Vertex aktual = ver, predosly = ver;
+                    while (!aktual.vertex_id.Equals(smerovac.routerID))
+                    {
+                        if (aktual.lsa.LSType == LSAType.Router) predosly = aktual;
+                        aktual = aktual.reverse;
+                    }
+                    if (predosly.lsa.LSType == LSAType.Network) continue;
+                    foreach(RouterLink link in ((RouterLSA)predosly.lsa).RouterLinks)
+                    {
+                        if (IPtoNet(link.LinkData, smerovac.ports[0].maska).Equals(IPtoNet(smerovac.ports[0].ip_add, smerovac.ports[0].maska)))
+                        {
+                            nexthop = link.LinkData;
+                            port = smerovac.ports[0];
+                        } else if (IPtoNet(link.LinkData, smerovac.ports[1].maska).Equals(IPtoNet(smerovac.ports[1].ip_add, smerovac.ports[1].maska)))
+                        {
+                            nexthop = link.LinkData;
+                            port = smerovac.ports[1];
+                        }
+                    }
+                    RT_zaznam novy = new RT_zaznam(IPtoNet(network.LinkStateID, network.NetworkMask), network.NetworkMask, nexthop, port, 'O');
+                    novy.metric = ver.distance;
+                    PridajSietDoTabulky(novy);
+                }
+            }
+        }
+
+        public List<Vertex> removeFromCandidates(List<Vertex> list, Vertex vertex)
+        {
+            List<Vertex> to_delete = new List<Vertex>();
+            foreach(Vertex v in list)
+            {
+                if (v.vertex_id.Equals(vertex.vertex_id)) to_delete.Add(v);
+            }
+            foreach(Vertex v in to_delete)
+            {
+                list.Remove(v);
+            }
+            return list;
+        }
+
+        public Vertex getMinVertex(List<Vertex> list)
+        {
+            Vertex min = null;
+            foreach (Vertex vertex in list)
+            {
+                if (min == null) min = vertex;
+                else if (min.distance > vertex.distance) min = vertex;
+            }
+            return min;
+        }
+
+        public RouterLSA getRLSA(List<DatabaseRecord> database, IPAddress ip)
+        {
+            foreach(DatabaseRecord lsa in database)
+            {
+                if (lsa.lsa.LSType == LSAType.Router && ip.Equals(lsa.lsa.LinkStateID))
+                {
+                    if (lsa.lsa.LSAge < 3600) return (RouterLSA)lsa.lsa;
+                    else return null;
+                }
+            }
+            return null;
+        }
+
+        public NetworkLSA getNetwork(List<DatabaseRecord> database, IPAddress ip)
+        {
+            foreach (DatabaseRecord lsa in database)
+            {
+                if (lsa.lsa.LSType == LSAType.Network && ip.Equals(lsa.lsa.LinkStateID))
+                {
+                    if (lsa.lsa.LSAge < 3600) return (NetworkLSA)lsa.lsa;
+                    else return null;
+                }
+            }
+            return null;
+        }
+
+        public bool IsInTree(LSA lsa, List<Vertex> tree)
+        {
+            foreach(Vertex vertex in tree)
+            {
+                // MOZNO NEBUDE FUNGOVAT
+                if (lsa.LinkStateID.Equals(vertex.vertex_id) && lsa == vertex.lsa)
+                    return true;
+            }
+            return false;
+        }
+
+        public List<Vertex> GetCandidates(List<Vertex> candidates, List<Vertex> tree, LSA lsa, Vertex vertex, List<DatabaseRecord> database, int cost)
+        {
+            if (lsa.LSType == LSAType.Router)
+            {
+                foreach (RouterLink link in ((RouterLSA)(lsa)).RouterLinks)
+                {
+                    if (link.Type == 3)
+                    {
+                        continue;
+                    }
+                    else if (link.Type == 2)
+                    {
+                        NetworkLSA net = getNetwork(database, link.LinkID);
+                        if (net != null && !IsInTree(net, tree))
+                        {
+                            Vertex newvertex = new Vertex(net.LinkStateID, net, cost + link.Metric, vertex);
+                            candidates.Add(newvertex);
+                        }
+                    }
+                    else
+                    {
+                        RouterLSA router = getRLSA(database, link.LinkID);
+                        if (router != null && !IsInTree(router, tree))
+                        {
+                            Vertex newvertex = new Vertex(router.LinkStateID, router, cost + link.Metric, vertex);
+                            candidates.Add(newvertex);
+                        }
+                    }
+                }
+            } else
+            {
+                foreach(IPAddress ip in ((NetworkLSA)lsa).AttachedRouters)
+                {
+                    RouterLSA router = getRLSA(database, ip);
+                    if (router != null && !IsInTree(router, tree))
+                    {
+                        Vertex newvertex = new Vertex(router.LinkStateID, router, cost, vertex);
+                        candidates.Add(newvertex);
+                    }
+                }
+            }
+            return candidates;
         }
 
         public void Install(LSA lsa, DatabaseRecord old)
         {
             smerovac.mut_database.WaitOne();
-            //SPF
             if (old != null) smerovac.my_database.Remove(old);
             smerovac.my_database.Add(new DatabaseRecord(lsa));
-            foreach(Neighbor nei in smerovac.neighbors)
+            List<DatabaseRecord> copy = smerovac.my_database;
+            smerovac.mut_database.ReleaseMutex();
+            foreach (Neighbor nei in smerovac.neighbors)
             {
                 if (old != null) nei.RemoveRetransLSA(old.lsa);
             }
-            smerovac.mut_database.ReleaseMutex();
+            
+            //SPF
+            new Thread(() =>
+            {
+                smerovac.mut_spf.WaitOne();
+                SPF(copy);
+                smerovac.mut_spf.ReleaseMutex();
+            }).Start();
         }
 
-        public void SelfOriginated(LSA lsa)
+        public void SelfOriginated(LSA lsa, Port port)
         {
             Console.WriteLine("SELF ORIGINATED LSA");
+            if (lsa.LSType == LSAType.Network && smerovac.ospf.DRs.ElementAt(smerovac.ports.IndexOf(port)).Equals(port.ip_add))
+            {
+                NetworkLSA net = null;
+                smerovac.mut_sused.WaitOne();
+                List<IPAddress> routers = FullNeighbor(port);
+                smerovac.mut_sused.ReleaseMutex();
+                if (routers.Count == 0) return;
+                routers.Add(smerovac.routerID);
+                NetworkLSA newnet = new NetworkLSA(routers)
+                {
+                    Options = 2,
+                    LSAge = 0,
+                    LinkStateID = smerovac.ospf.DRs.ElementAt(smerovac.ports.IndexOf(port)),
+                    AdvertisingRouter = smerovac.routerID,
+                    LSSequenceNumber = lsa.LSSequenceNumber + 1,
+                    Checksum = 0,
+                    NetworkMask = port.maska
+                };
+
+                if (smerovac.my_network_lsa.Count > 0)
+                {
+                    foreach (NetworkLSA n in smerovac.my_network_lsa)
+                        if (n.LinkStateID.Equals(port.ip_add)) net = n;
+                }
+
+                if (net != null)
+                {
+                    smerovac.my_network_lsa.Remove(net);
+                }
+                newnet.Checksum = smerovac.Fletcher(newnet.Bytes, 2, newnet.Length);
+                smerovac.my_network_lsa.Add(newnet);
+                Flood(newnet, null, null, null);
+                DatabaseRecord old = smerovac.GetInstanceOfLSA(net);
+                Install(newnet, old);
+            }
+            else if (LSAType.Network == lsa.LSType)
+            {
+                lsa.LSAge = 3600;
+                Flood(lsa, null, null, null);
+            } else if (LSAType.Router == lsa.LSType)
+            {
+                if (GetNewerLSA(lsa, smerovac.my_lsa) == lsa)
+                {
+                    RouterLSA mynew = new RouterLSA(smerovac.links)
+                    {
+                        Options = 2,
+                        LSAge = 0,
+                        LinkStateID = smerovac.routerID,
+                        AdvertisingRouter = smerovac.routerID,
+                        LSSequenceNumber = lsa.LSSequenceNumber + 1,
+                        Checksum = 0,
+                        VBit = 0,
+                        EBit = 0,
+                        BBit = 0
+                    };
+                    mynew.Checksum = smerovac.Fletcher(mynew.Bytes, 2, mynew.Length);
+                    smerovac.my_lsa = mynew;
+                    Flood(mynew, null, null, null);
+                    DatabaseRecord old = smerovac.GetInstanceOfLSA(lsa);
+                    Install(mynew, old);
+                }
+            }
         }
 
         public void SendDelayedACK(LSA lsa, Port port, Neighbor neighbor)
@@ -2048,16 +2499,11 @@ namespace Router
             port.port.SendPacket(eth);
         }
 
-        public void SendDirectACK(LSA lsa, Port port, Neighbor neighbor)
+        public void SendDirectACK(LSA lsa, Port port, Neighbor neighbor, PhysicalAddress mac)
         {
-            PhysicalAddress neighbor_mac = ARPLookup(neighbor.ip_add);
-            while (neighbor_mac == null)
-            {
-                PosliArpRequest(neighbor.output, neighbor.ip_add);
-                Thread.Sleep(1000);
-                neighbor_mac = ARPLookup(neighbor.ip_add);
-            }
-            EthernetPacket eth = new EthernetPacket(port.port.MacAddress, neighbor_mac, EthernetPacketType.IPv4);
+            Console.WriteLine("ZACAL SOM SENDDIRECKACK");
+            
+            EthernetPacket eth = new EthernetPacket(port.port.MacAddress, mac, EthernetPacketType.IPv4);
             IPv4Packet ip = new IPv4Packet(port.ip_add, neighbor.ip_add)
             {
                 TimeToLive = 1,
@@ -2074,7 +2520,8 @@ namespace Router
             ip.PayloadPacket = ack;
             ack.Checksum = smerovac.ComputeChecksum(ack.HeaderData, 0, ack.HeaderData.Length);
             ip.UpdateIPChecksum();
-            port.port.SendPacket(eth);
+            neighbor.output.port.SendPacket(eth);
+            Console.WriteLine("SKONCIL SOM SENDDIRECKACK--------");
         }
 
         /*
@@ -2151,7 +2598,11 @@ namespace Router
             if (CostPort1.Text != "")
             {
                 smerovac.ports[0].cost = int.Parse(CostPort1.Text);
-                if (smerovac.GetPortAt(0).ospf) MakeRouterLSA(smerovac.GetPortAt(0), smerovac.ospf.DRs[smerovac.ports.IndexOf(smerovac.GetPortAt(0))]);
+                if (smerovac.GetPortAt(0).ospf) {
+                    smerovac.mut_sused.WaitOne();
+                    MakeRouterLSA(smerovac.GetPortAt(0), smerovac.ospf.DRs[smerovac.ports.IndexOf(smerovac.GetPortAt(0))]);
+                    smerovac.mut_sused.ReleaseMutex();
+                }
             }
             CostPort1.Text = "";
         }
@@ -2161,7 +2612,12 @@ namespace Router
             if (CostPort2.Text != "")
             {
                 smerovac.ports[1].cost = int.Parse(CostPort2.Text);
-                if (smerovac.GetPortAt(1).ospf) MakeRouterLSA(smerovac.GetPortAt(1), smerovac.ospf.DRs[smerovac.ports.IndexOf(smerovac.GetPortAt(1))]);
+                if (smerovac.GetPortAt(1).ospf)
+                {
+                    smerovac.mut_sused.WaitOne();
+                    MakeRouterLSA(smerovac.GetPortAt(1), smerovac.ospf.DRs[smerovac.ports.IndexOf(smerovac.GetPortAt(1))]);
+                    smerovac.mut_sused.ReleaseMutex();
+                }
             }
             CostPort2.Text = "";
         }
@@ -2262,7 +2718,7 @@ namespace Router
             smerovac.mut_rt.WaitOne();
             foreach (RT_zaznam rt in smerovac.smerovacia_tabulka)
             {
-                if (rt.ip_add.Equals(novy.ip_add) && rt.maska.Equals(novy.maska) && rt.metric > novy.metric)
+                if (rt.ip_add.Equals(novy.ip_add) && rt.maska.Equals(novy.maska) && rt.metric < novy.metric)
                 {
                     smerovac.mut_rt.ReleaseMutex();
                     return;
@@ -2275,9 +2731,16 @@ namespace Router
 
         public void VypisSmerovacejTabulky()
         {
-            RTListbox.Items.Clear();
+            RTListbox.Dispatcher.Invoke(() =>
+            {
+                RTListbox.Items.Clear();
+            });
+            
             foreach (RT_zaznam rt in smerovac.smerovacia_tabulka)
-                RTListbox.Items.Add(rt.Vypis());
+                RTListbox.Dispatcher.Invoke(() =>
+                {
+                    RTListbox.Items.Add(rt.Vypis());
+                });
         }
 
         /*
